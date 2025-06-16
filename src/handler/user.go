@@ -4,8 +4,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 	"hmdp-Go/src/dto"
+	"hmdp-Go/src/middleware"
 	"hmdp-Go/src/service"
 	"net/http"
+	"strconv"
+	"time"
 )
 
 type UserHandler struct {
@@ -49,4 +52,50 @@ func (*UserHandler) Login(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, dto.OkWithData(token))
+}
+
+// @Description: user layout
+// @Router: /user/logout [POST]
+func (*UserHandler) Logout(c *gin.Context) {
+	// TODO 实现注销功能
+	c.JSON(http.StatusOK, dto.Fail[string]("this function is not finished"))
+}
+
+// @Description: get the info of me
+// @Router: /user/me [GET]
+func (*UserHandler) Me(c *gin.Context) {
+	// TODO 获取当前登录的用户
+	userDTO, err := middleware.GetUserInfo(c)
+	if err != nil {
+		logrus.Error("the user info is empty!")
+		c.JSON(http.StatusOK, dto.Fail[string]("the user info is empty!"))
+		return
+	}
+	c.JSON(http.StatusOK, dto.OkWithData(userDTO))
+}
+
+// @Description: get the info of user by user Id
+// @Router /user/info/:id [GET]
+func (*UserHandler) Info(c *gin.Context) {
+	idStr := c.Param("id")
+	if idStr == "" {
+		logrus.Error("id str is empty!")
+		c.JSON(http.StatusOK, dto.Fail[string]("id str is empty!"))
+		return
+	}
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		logrus.Error("parse int failed!")
+		c.JSON(http.StatusOK, dto.Fail[string]("id parse failed!"))
+		return
+	}
+	userInfo, err := service.UserInfoManager.GetUserInfoById(id)
+	if err != nil {
+		logrus.Error("get user info failed!")
+		c.JSON(http.StatusOK, dto.Fail[string]("get user info failed!"))
+		return
+	}
+	userInfo.CreateTime = time.Time{}
+	userInfo.UpdateTime = time.Time{}
+	c.JSON(http.StatusOK, dto.OkWithData(userInfo))
 }
