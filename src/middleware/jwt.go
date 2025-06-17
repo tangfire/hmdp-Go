@@ -13,7 +13,7 @@ import (
 
 var control = &singleflight.Group{}
 
-type CustomClamis struct {
+type CustomClaims struct {
 	dto.UserDTO
 	BufferTime int64
 	jwt.RegisteredClaims
@@ -42,10 +42,10 @@ func NewJWT() *JWT {
 	}
 }
 
-func (j *JWT) CreateClaims(userInfo dto.UserDTO) CustomClamis {
+func (j *JWT) CreateClaims(userInfo dto.UserDTO) CustomClaims {
 	now := time.Now().Unix()
 
-	claims := CustomClamis{
+	claims := CustomClaims{
 		UserDTO:    userInfo,
 		BufferTime: 86400, // buffer time 1 day
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -58,20 +58,20 @@ func (j *JWT) CreateClaims(userInfo dto.UserDTO) CustomClamis {
 	return claims
 }
 
-func (j *JWT) CreateToken(clamis CustomClamis) (string, error) {
+func (j *JWT) CreateToken(clamis CustomClaims) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, clamis)
 	return token.SignedString(j.SigningKey)
 }
 
-func (j *JWT) CreateTokenByOldToken(oldToken string, claims CustomClamis) (string, error) {
+func (j *JWT) CreateTokenByOldToken(oldToken string, claims CustomClaims) (string, error) {
 	v, err, _ := control.Do("JWT"+oldToken, func() (interface{}, error) {
 		return j.CreateToken(claims)
 	})
 	return v.(string), err
 }
 
-func (j *JWT) ParseToken(tokenStr string) (*CustomClamis, error) {
-	token, err := jwt.ParseWithClaims(tokenStr, &CustomClamis{}, func(token *jwt.Token) (interface{}, error) {
+func (j *JWT) ParseToken(tokenStr string) (*CustomClaims, error) {
+	token, err := jwt.ParseWithClaims(tokenStr, &CustomClaims{}, func(token *jwt.Token) (interface{}, error) {
 		return j.SigningKey, nil
 	})
 
@@ -88,7 +88,7 @@ func (j *JWT) ParseToken(tokenStr string) (*CustomClamis, error) {
 	}
 
 	if token.Valid {
-		if clamis, ok := token.Claims.(*CustomClamis); ok {
+		if clamis, ok := token.Claims.(*CustomClaims); ok {
 			return clamis, nil
 		}
 		return nil, TokenInValid
@@ -98,7 +98,7 @@ func (j *JWT) ParseToken(tokenStr string) (*CustomClamis, error) {
 
 }
 
-func GetClamis(c *gin.Context) (*CustomClamis, error) {
+func GetClamis(c *gin.Context) (*CustomClaims, error) {
 	token := c.Request.Header.Get(JWT_TOKEN_KEY)
 	j := NewJWT()
 	clamis, err := j.ParseToken(token)
@@ -108,17 +108,21 @@ func GetClamis(c *gin.Context) (*CustomClamis, error) {
 	return clamis, err
 }
 
+// 仅用于已认证的路由（确保中间件已设置 claims）
 func GetUserInfo(c *gin.Context) (dto.UserDTO, error) {
-	if clamis, exists := c.Get("claims"); !exists {
-		if cl, err := GetClamis(c); err != nil {
-			return dto.UserDTO{}, err
-		} else {
-			return cl.UserDTO, nil
-		}
-	} else {
-		waitUse := clamis.(*CustomClamis)
-		return waitUse.UserDTO, nil
+	claims, exists := c.Get("claims")
+	if !exists {
+		// 明确拒绝处理未经验证的请求
+		return dto.UserDTO{}, errors.New("请求未经验证")
 	}
+
+	// 安全地进行类型断言
+	customClaims, ok := claims.(*CustomClaims) // 注意修正拼写: CustomClamis→CustomClaims
+	if !ok {
+		return dto.UserDTO{}, errors.New("claims 类型错误")
+	}
+
+	return customClaims.UserDTO, nil
 }
 
 func JWTAuth() gin.HandlerFunc {
