@@ -72,4 +72,19 @@ func ConfigRouter(r *gin.Engine) {
 		blogControllerWithOutMid.GET("/hot", blogHandler.QueryHotBlog)
 	}
 
+	followContoller := r.Group("/follow", middleware.JWTAuth())
+
+	{
+		followContoller.PUT("/:id/:isFollow", followHanlder.Follow)
+		followContoller.GET("/common/:id", followHanlder.FollowCommons)
+		followContoller.GET("/or/not/:id", followHanlder.IsFollow)
+	}
+
+	uploadController := r.Group("/upload", middleware.JWTAuth())
+
+	{
+		uploadController.POST("/blog", uploadHandler.UploadImage)
+		uploadController.GET("/blog/delete", uploadHandler.DeleteBlogImg)
+	}
+
 }

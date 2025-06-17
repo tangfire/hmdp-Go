@@ -28,7 +28,7 @@ func (f *Follow) SaveUserFollow() error {
 
 func (f *Follow) IsFollowing() (int, error) {
 	var count int
-	err := mysql.GetMysqlDB().Table(f.TableName()).Where("user_id = ? and follow_user_id = ?", f.UserId, f.Id).Count(&count).Error
+	err := mysql.GetMysqlDB().Table(f.TableName()).Where("user_id = ? AND follow_user_id = ?", f.UserId, f.FollowUserId).Count(&count).Error
 	return count, err
 }
 

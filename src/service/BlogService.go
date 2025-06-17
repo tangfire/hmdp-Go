@@ -2,12 +2,16 @@ package service
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	redisConfig "github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 	"hmdp-Go/src/config/redis"
+	"hmdp-Go/src/dto"
 	"hmdp-Go/src/model"
 	"hmdp-Go/src/utils"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -92,4 +96,183 @@ func (*BlogService) LikeBlog(id int64, userId int64) (err error) {
 		err = redis.GetRedisClient().ZRem(ctx, redisKey, userStr).Err()
 	}
 	return err
+}
+
+func (*BlogService) QueryMyBlog(id int64, current int) ([]model.Blog, error) {
+	var blog model.Blog
+	blog.UserId = id
+	blogs, err := blog.QueryBlogs(current)
+	return blogs, err
+}
+
+func (*BlogService) QueryHotBlogs(current int) ([]model.Blog, error) {
+	var blogUtils model.Blog
+	blogs, err := blogUtils.QueryHots(current)
+	if err != nil {
+		return nil, err
+	}
+	for i := range blogs {
+		id := blogs[i].UserId
+		user, err := UserManager.GetUserById(id)
+		if err != nil {
+			logrus.Error(err.Error())
+			continue
+		}
+		blogs[i].Icon = user.Icon
+		blogs[i].Name = user.NickName
+	}
+
+	return blogs, nil
+}
+
+func (*BlogService) GetBlogById(id int64) (model.Blog, error) {
+	var blog model.Blog
+	err := blog.GetBlogById(id)
+	if err != nil {
+		return model.Blog{}, err
+	}
+
+	userId := blog.UserId
+	user, err := UserManager.GetUserById(userId)
+
+	if err != nil {
+		return model.Blog{}, err
+	}
+
+	blog.Name = user.NickName
+	blog.Icon = user.Icon
+
+	return blog, err
+}
+
+func (*BlogService) QueryUserLike(id int64) ([]dto.UserDTO, error) {
+	// get the redis key
+	redisKey := utils.BLOG_LIKE_KEY + strconv.FormatInt(id, 10)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	idStrs, err := redis.GetRedisClient().ZRange(ctx, redisKey, 0, 4).Result()
+	if err != nil {
+		return []dto.UserDTO{}, err
+	}
+
+	if idStrs == nil || len(idStrs) == 0 {
+		return []dto.UserDTO{}, err
+	}
+
+	var ids []int64
+	for _, value := range idStrs {
+		id, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return []dto.UserDTO{}, err
+		}
+		ids = append(ids, id)
+	}
+
+	var userUtils model.User
+	users, err := userUtils.GetUsersByIds(ids)
+	if err != nil {
+		return []dto.UserDTO{}, err
+	}
+
+	userDTOS := make([]dto.UserDTO, len(users))
+	for i := range users {
+		userDTOS[i].Id = users[i].Id
+		userDTOS[i].Icon = users[i].Icon
+		userDTOS[i].NickName = users[i].NickName
+	}
+	return userDTOS, nil
+}
+
+func (*BlogService) QueryBlogOfFollow(maxTime int64, offset int, userId int64, pageSize int) (dto.ScrollResult[model.Blog], error) {
+	redisKey := utils.FEED_KEY + strconv.FormatInt(userId, 10)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 1. 从 Redis 获取博客 ID
+	result, err := redis.GetRedisClient().ZRevRangeByScoreWithScores(ctx, redisKey,
+		&redisConfig.ZRangeBy{
+			Min:    "0",
+			Max:    strconv.FormatInt(maxTime, 10),
+			Offset: int64(offset),
+			Count:  int64(pageSize),
+		}).Result()
+	if err != nil || len(result) == 0 {
+		return dto.ScrollResult[model.Blog]{}, err
+	}
+
+	// 2. 提取 ID 并计算 minTime/offset
+	var (
+		ids     []int64
+		minTime = int64(0)
+		os      = 0 // the number of equal number
+	)
+	for _, value := range result {
+		id := value.Member.(int64)
+		ids = append(ids, id)
+
+		score := int64(value.Score)
+		if score == minTime {
+			os++
+		} else {
+			minTime = score
+			os = 1
+		}
+	}
+
+	// 3. 批量查询博客详情
+	var blogUtils model.Blog
+	blogs, err := blogUtils.QueryBlogByIds(ids)
+	if err != nil {
+		return dto.ScrollResult[model.Blog]{}, err
+	}
+
+	// 4. 并发填充用户信息和点赞状态
+	var wg sync.WaitGroup
+	for i := range blogs {
+		wg.Add(2)
+		go func(b *model.Blog) {
+			defer wg.Done()
+			if err := createBlogUser(b); err != nil {
+				logrus.Warnf("Fill user failed for blog %d: %v", b.Id, err)
+			}
+		}(&blogs[i])
+
+		go func(b *model.Blog) {
+			defer wg.Done()
+			isBlogLiked(userId, b)
+		}(&blogs[i])
+	}
+	wg.Wait()
+
+	// 5. 返回结果
+	return dto.ScrollResult[model.Blog]{
+		Data:    blogs,
+		MinTime: minTime,
+		Offset:  os,
+	}, nil
+}
+
+func createBlogUser(blog *model.Blog) error {
+	userId := blog.UserId
+	var userUtils model.User
+	user, err := userUtils.GetUserById(userId)
+
+	if err != nil {
+		return fmt.Errorf("failed to get user %d: %v", blog.UserId, err)
+	}
+	blog.Name = user.NickName
+	blog.Icon = user.Icon
+	return nil
+}
+
+func isBlogLiked(userId int64, blog *model.Blog) {
+	// Key 应基于博客ID，而非用户ID
+	redisKey := utils.BLOG_LIKE_KEY + strconv.FormatInt(blog.Id, 10)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 查询用户ID是否在博客的点赞集合中
+	err := redis.GetRedisClient().ZScore(ctx, redisKey, strconv.FormatInt(userId, 10)).Err()
+	blog.IsLike = !errors.Is(err, redisConfig.Nil) // 存在即表示已点赞
 }

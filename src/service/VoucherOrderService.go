@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/jinzhu/gorm"
+	"github.com/mitchellh/mapstructure"
 	redisConfig "github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 	"hmdp-Go/src/config/mysql"
@@ -11,6 +12,7 @@ import (
 	"hmdp-Go/src/model"
 	"hmdp-Go/src/utils"
 	"io/ioutil"
+	"log"
 	"strconv"
 	"sync"
 	"time"
@@ -21,6 +23,13 @@ type VoucherOrderService struct {
 
 var VoucherOrderManager *VoucherOrderService
 var useLocks sync.Map
+var voucherScript *redisConfig.Script
+
+func init() {
+	script, _ := ioutil.ReadFile("script/voucher_script.lua")
+
+	voucherScript = redisConfig.NewScript(string(script))
+}
 
 func InitOrderHandler() {
 	// run the goroutine
@@ -88,9 +97,7 @@ func InitOrderHandler() {
 //		}
 //		voucherOrder.UserId = userId
 //		voucherOrder.VoucherId = voucherId
-//		voucherOrder.PayTime = time.Now()
-//		voucherOrder.UseTime = time.Now()
-//		voucherOrder.RefundTime = time.Now()
+//		voucherOrder.CreateTime = time.Now()
 //		voucherOrder.UpdateTime = time.Now()
 //
 //		// 3. decr the stock
@@ -127,17 +134,10 @@ func (vo *VoucherOrderService) SeckillVoucher(voucherId int64, userId int64) err
 	values = append(values, strconv.FormatInt(userId, 10))
 	values = append(values, strconv.FormatInt(orderId, 10))
 
-	script, err := ioutil.ReadFile("script/voucher_script.lua")
-	if err != nil {
-		return err
-	}
-
-	scriptBash := redisConfig.NewScript(string(script))
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	result, err := scriptBash.Run(ctx, redisClient.GetRedisClient(), keys, values...).Result()
+	result, err := voucherScript.Run(ctx, redisClient.GetRedisClient(), keys, values...).Result()
 	if err != nil {
 		return err
 	}
@@ -191,9 +191,13 @@ func SyncHandlerStream() {
 				}
 				// ack the message
 				logrus.Error("begin to process: ", order)
-				handleVoucherOrder(order)
+				err := handleVoucherOrder(order)
+				if err != nil {
+					logrus.Error("handle failed:", err)
+					continue // 不ACK，等待重试
+				}
 				logrus.Info("the message is ack", message.ID)
-				_, err := redisClient.GetRedisClient().XAck(ctx, "stream.orders", "g1", message.ID).Result()
+				_, err = redisClient.GetRedisClient().XAck(ctx, "stream.orders", "g1", message.ID).Result()
 				if err != nil {
 					handlePendingList()
 					logrus.Error("ack the message failed")
@@ -204,7 +208,7 @@ func SyncHandlerStream() {
 	}
 }
 
-func handleVoucherOrder(voucherOrder model.VoucherOrder) {
+func handleVoucherOrder(voucherOrder model.VoucherOrder) error {
 	userId := voucherOrder.UserId
 	lock := getUserLock(userId)
 	lock.Lock()
@@ -213,17 +217,23 @@ func handleVoucherOrder(voucherOrder model.VoucherOrder) {
 	err := createNewOrderNew(mysql.GetMysqlDB(), voucherOrder)
 	if err != nil {
 		logrus.Error("add data into mysql failed!")
-		return
+		return err
 	}
+	return nil
 }
 
 func createNewOrderNew(db *gorm.DB, voucherOrder model.VoucherOrder) error {
 	return db.Transaction(func(tx *gorm.DB) error {
 		voucherOrder.CreateTime = time.Now()
-		voucherOrder.PayTime = time.Now()
-		voucherOrder.UseTime = time.Now()
-		voucherOrder.RefundTime = time.Now()
 		voucherOrder.UpdateTime = time.Now()
+		// 在事务中添加检查
+		var count int64
+		tx.Model(&model.VoucherOrder{}).
+			Where("user_id = ? AND voucher_id = ?", voucherOrder.UserId, voucherOrder.VoucherId).
+			Count(&count)
+		if count > 0 {
+			return errors.New("user already purchased this voucher")
+		}
 
 		var seckillvoucher model.SecKillVoucher
 		err := seckillvoucher.DecrVoucherStock(voucherOrder.VoucherId, tx)
@@ -243,47 +253,60 @@ func createNewOrderNew(db *gorm.DB, voucherOrder model.VoucherOrder) error {
 }
 
 func handlePendingList() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+	ctx := context.Background()
 	for {
+		// 1. 从pending-list读取未确认消息
 		msgs, err := redisClient.GetRedisClient().XReadGroup(ctx, &redisConfig.XReadGroupArgs{
 			Group:    "g1",
 			Consumer: "c1",
-			Streams:  []string{"stream.orders", "0"},
+			Streams:  []string{"stream.orders", "0"}, // 0表示读取未确认消息
 			Count:    1,
-			Block:    2 * time.Second,
+			Block:    2 * time.Second, // 阻塞时间
 		}).Result()
 
+		// 2. 处理读取错误
 		if err != nil {
-			break
-		}
-
-		// there is not msg in pending list
-		if len(msgs) == 1 && (len(msgs[0].Messages) == 0) {
-			break
-		}
-
-		for _, stream := range msgs {
-			for _, message := range stream.Messages {
-				var order model.VoucherOrder
-				for key, value := range message.Values {
-					switch key {
-					case "id":
-						order.Id, _ = strconv.ParseInt(value.(string), 10, 64)
-					case "userId":
-						order.UserId, _ = strconv.ParseInt(value.(string), 10, 64)
-					case "voucherId":
-						order.VoucherId, _ = strconv.ParseInt(value.(string), 10, 64)
-					}
-				}
-				handleVoucherOrder(order)
-				err = redisClient.GetRedisClient().XAck(ctx, "stream.orders", "g1", message.ID).Err()
-				if err != nil {
-					time.Sleep(20 * time.Millisecond)
-					break
-				}
+			if err == redisConfig.Nil { // 阻塞超时无消息
+				break
 			}
+			log.Printf("XReadGroup error: %v", err)
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+
+		// 3. 精确检查有效消息 - 修正点
+		if len(msgs) == 0 {
+			break
+		}
+
+		// 我们只查询了一个流，所以取第一个流
+		stream := msgs[0]
+		if len(stream.Messages) == 0 {
+			break
+		}
+
+		// 4. 处理消息（Count=1确保只有一条）
+		msg := stream.Messages[0]
+		var order model.VoucherOrder
+
+		// 使用mapstructure库安全转换（需要导入）
+		if err := mapstructure.Decode(msg.Values, &order); err != nil {
+			log.Printf("解析消息错误: %v", err)
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+
+		// 5. 处理订单
+		if err := handleVoucherOrder(order); err != nil {
+			log.Printf("处理订单失败: %v", err)
+			time.Sleep(20 * time.Millisecond)
+			continue // 失败不ACK，下次重试
+		}
+
+		// 6. ACK确认
+		if err := redisClient.GetRedisClient().XAck(ctx, "stream.orders", "g1", msg.ID).Err(); err != nil {
+			log.Printf("ACK确认失败: %v", err)
+			time.Sleep(20 * time.Millisecond)
 		}
 	}
 }

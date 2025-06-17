@@ -1,14 +1,18 @@
 package main
 
 import (
-	"context"
-	"fmt"
-	"time"
+	"github.com/gin-gonic/gin"
+	"hmdp-Go/src/config"
+	"hmdp-Go/src/handler"
+	"hmdp-Go/src/service"
 )
 
 func main() {
-	_, cancel := context.WithTimeout(context.Background(), time.Second*5)
-	fmt.Println("hello")
-	defer cancel()
+	r := gin.Default()
+	config.Init()
+	handler.ConfigRouter(r)
+	service.InitOrderHandler()
+
+	r.Run(":8081")
 
 }
