@@ -129,22 +129,67 @@ func JWTAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := c.Request.Header.Get(JWT_TOKEN_KEY)
 		if token == "" {
-			logrus.Error("token is empty")
-			c.JSON(http.StatusUnauthorized, dto.Fail[string]("not Authorization"))
+			c.JSON(http.StatusUnauthorized, dto.Fail[string]("未提供Token"))
 			c.Abort()
 			return
 		}
+
 		j := NewJWT()
 		claims, err := j.ParseToken(token)
+
+		// 统一错误处理
 		if err != nil {
-			if err == TokenExpired {
-				logrus.Warn("token is expired")
-				c.JSON(http.StatusOK, dto.Fail[string]("token is expired"))
-				c.Abort()
-				return
+			status := http.StatusUnauthorized
+			msg := "Token无效"
+
+			switch {
+			case errors.Is(err, TokenExpired):
+				msg = "Token已过期"
+				now := time.Now().Unix()
+				if claims != nil && now-claims.ExpiresAt.Unix() < claims.BufferTime {
+					newToken, err := j.RefreshToken(token)
+					if err != nil {
+						logrus.Warnf("刷新Token失败: %v", err)
+					} else {
+						c.Header("X-New-Token", newToken)
+						if newClaims, err := j.ParseToken(newToken); err == nil {
+							claims = newClaims
+						}
+					}
+				}
+			case errors.Is(err, TokenMalformed):
+				msg = "Token格式错误"
+			default:
+				logrus.Errorf("JWT解析异常: %v", err)
+				msg = "认证服务不可用"
+				status = http.StatusInternalServerError
+			}
+
+			c.JSON(status, dto.Fail[string](msg))
+			c.Abort()
+			return
+		}
+
+		// 静默刷新（深拷贝claims避免竞态）
+		newClaims := *claims
+		if claims.ExpiresAt.Unix()-time.Now().Unix() < 1800 {
+			if newToken, err := j.CreateTokenByOldToken(token, newClaims); err == nil {
+				c.Header("X-New-Token", newToken)
 			}
 		}
+
 		c.Set("claims", claims)
 		c.Next()
 	}
+}
+
+func (j *JWT) RefreshToken(oldToken string) (string, error) {
+	claims, err := j.ParseToken(oldToken)
+	if err != nil && !errors.Is(err, TokenExpired) {
+		return "", err
+	}
+
+	// 创建新声明（延长有效期）
+	newClaims := j.CreateClaims(claims.UserDTO)
+	return j.CreateToken(newClaims)
 }
