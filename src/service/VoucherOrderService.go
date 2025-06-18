@@ -207,11 +207,11 @@ func createVoucherOrder(order model.VoucherOrder) error {
 	return mysql.GetMysqlDB().Transaction(func(tx *gorm.DB) error {
 		// 1. 检查是否已购买
 		//查询订单（历史订单检查）
-		flag, err := new(model.VoucherOrder).HasPurchasedVoucher(order.UserId, order.VoucherId, tx)
+		purchasedFlag, err := new(model.VoucherOrder).HasPurchasedVoucher(order.UserId, order.VoucherId, tx)
 		if err != nil {
 			return err
 		}
-		if flag {
+		if purchasedFlag {
 			return model.ErrDuplicateOrder
 		}
 
