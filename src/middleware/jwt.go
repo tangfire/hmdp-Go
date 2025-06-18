@@ -119,29 +119,32 @@ func JWTAuth() gin.HandlerFunc {
 		j := NewJWT()
 		claims, err := j.ParseToken(token)
 
+		// Token解析错误处理
 		if err != nil {
-			status := http.StatusUnauthorized
-			msg := "Invalid token"
-
-			switch {
-			case errors.Is(err, TokenExpired):
-				// 计算缓冲时间
-				if claims != nil {
-					bufferRemaining := time.Until(claims.ExpiresAt.Add(time.Duration(claims.BufferTime) * time.Second))
-					if bufferRemaining > 0 {
-						newToken, err := j.RefreshToken(token)
-						if err != nil {
-							logrus.Warn("Token refresh failed: ", err)
-							msg = "Token refresh failed"
-						} else {
-							c.Header("X-New-Token", newToken)
-							// 必须更新Claims
-							if newClaims, err := j.ParseToken(newToken); err == nil {
-								claims = newClaims
-							}
+			// 处理Token过期且处于缓冲期的情况
+			if errors.Is(err, TokenExpired) && claims != nil {
+				bufferRemaining := time.Until(claims.ExpiresAt.Add(time.Duration(claims.BufferTime) * time.Second))
+				if bufferRemaining > 0 {
+					newToken, err := j.RefreshToken(token)
+					if err == nil {
+						// 缓冲期刷新成功
+						c.Header("X-New-Token", newToken)
+						if newClaims, err := j.ParseToken(newToken); err == nil {
+							// 更新claims并继续处理请求
+							c.Set("claims", newClaims)
+							c.Next()
+							return
 						}
 					}
+					logrus.Warn("Token refresh failed: ", err)
 				}
+			}
+
+			// 其他错误情况
+			status := http.StatusUnauthorized
+			msg := "Invalid token"
+			switch {
+			case errors.Is(err, TokenExpired):
 				msg = "Token expired"
 			case errors.Is(err, TokenMalformed):
 				msg = "Malformed token"
@@ -156,14 +159,14 @@ func JWTAuth() gin.HandlerFunc {
 			return
 		}
 
-		// 静默刷新逻辑修复：生成全新Claims（含新过期时间）
+		// 静默刷新逻辑
 		if time.Until(claims.ExpiresAt.Time) < 30*time.Minute {
-			newClaims := j.CreateClaims(claims.UserDTO) // 生成新Claims
+			newClaims := j.CreateClaims(claims.UserDTO)
 			if newToken, err := j.CreateTokenByOldToken(token, newClaims); err == nil {
 				c.Header("X-New-Token", newToken)
 				claims = &newClaims // 更新当前请求的Claims
 			} else {
-				logrus.Warnf("静默刷新失败（继续使用旧Token）: %v", err) // 关键点：仅记录不中断
+				logrus.Warnf("Silent refresh failed (continue with old token): %v", err)
 			}
 		}
 
