@@ -237,6 +237,7 @@ func (*ShopService) QueryShopByIdPassThrough(id int64) (model.Shop, error) {
 }
 
 // @Description: use the logic expire to deal with the cache pass through
+// 注意：逻辑过期一定要先进行数据预热，将我们热点数据加载到缓存中
 func (*ShopService) QueryShopByIdWithLogicExpire(id int64) (model.Shop, error) {
 	redisKey := utils.CACHE_SHOP_KEY + strconv.FormatInt(id, 10)
 	ctx, cancel := context.WithCancel(context.Background())
