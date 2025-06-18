@@ -9,7 +9,7 @@ import (
 const (
 	ADDR     string = "127.0.0.1"
 	PORT     string = "6379"
-	PASSWORD string = "123456"
+	PASSWORD string = "8888.216"
 	DBINDEX  int    = 0
 )
 

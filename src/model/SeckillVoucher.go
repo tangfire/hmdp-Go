@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"github.com/jinzhu/gorm"
 	"hmdp-Go/src/config/mysql"
 	"time"
@@ -29,7 +30,17 @@ func (sec *SecKillVoucher) QuerySeckillVoucherById(id int64) error {
 	return mysql.GetMysqlDB().Table(sec.TableName()).Where("voucher_id = ?", id).First(sec).Error
 }
 
-func (sec *SecKillVoucher) DecrVoucherStock(id int64, tx *gorm.DB) error {
-	err := tx.Table(sec.TableName()).Where("voucher_id = ?", id).Where("stock > 0").Update("stock", gorm.Expr("stock - 1")).Error
-	return err
+// 直接通过库存条件实现乐观锁
+func (sv *SecKillVoucher) DecrVoucherStock(voucherId int64, tx *gorm.DB) error {
+	result := tx.Model(sv).
+		Where("voucher_id = ? AND stock > 0", voucherId).
+		Update("stock", gorm.Expr("stock - 1"))
+
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 { // 核心判断
+		return errors.New("库存不足")
+	}
+	return nil
 }
