@@ -33,7 +33,7 @@ var (
 	TokenExpired     = errors.New("Token is expired")
 	TokenNotValidYet = errors.New("Token is active yet")
 	TokenMalformed   = errors.New("Not a token")
-	TokenInValid     = errors.New("Could not handle this token")
+	TokenInvalid     = errors.New("Could not handle this token")
 )
 
 func NewJWT() *JWT {
@@ -43,19 +43,17 @@ func NewJWT() *JWT {
 }
 
 func (j *JWT) CreateClaims(userInfo dto.UserDTO) CustomClaims {
-	now := time.Now().Unix()
-
-	claims := CustomClaims{
+	now := time.Now()
+	return CustomClaims{
 		UserDTO:    userInfo,
 		BufferTime: 86400, // buffer time 1 day
 		RegisteredClaims: jwt.RegisteredClaims{
-			NotBefore: jwt.NewNumericDate(time.Unix(now-1000, 0)), // the time of jwt is useful
-			ExpiresAt: jwt.NewNumericDate(time.Unix(now+604800, 0)),
+			NotBefore: jwt.NewNumericDate(now.Add(-10 * time.Minute)),  // 生效时间（留有余量）
+			ExpiresAt: jwt.NewNumericDate(now.Add(7 * 24 * time.Hour)), // 7天有效期
 			Issuer:    JWT_ISSUER,
-			IssuedAt:  jwt.NewNumericDate(time.Unix(now, 0)),
+			IssuedAt:  jwt.NewNumericDate(now),
 		},
 	}
-	return claims
 }
 
 func (j *JWT) CreateToken(clamis CustomClaims) (string, error) {
@@ -82,30 +80,14 @@ func (j *JWT) ParseToken(tokenStr string) (*CustomClaims, error) {
 			return nil, TokenExpired
 		} else if errors.Is(err, jwt.ErrTokenNotValidYet) {
 			return nil, TokenNotValidYet
-		} else {
-			return nil, TokenInValid
 		}
+		return nil, TokenInvalid
 	}
 
-	if token.Valid {
-		if clamis, ok := token.Claims.(*CustomClaims); ok {
-			return clamis, nil
-		}
-		return nil, TokenInValid
-	} else {
-		return nil, TokenInValid
+	if claims, ok := token.Claims.(*CustomClaims); ok && token.Valid {
+		return claims, nil
 	}
-
-}
-
-func GetClamis(c *gin.Context) (*CustomClaims, error) {
-	token := c.Request.Header.Get(JWT_TOKEN_KEY)
-	j := NewJWT()
-	clamis, err := j.ParseToken(token)
-	if err != nil {
-		logrus.Error("Failed to obtain parsed clamis")
-	}
-	return clamis, err
+	return nil, TokenInvalid
 }
 
 // 仅用于已认证的路由（确保中间件已设置 claims）
@@ -129,7 +111,7 @@ func JWTAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := c.Request.Header.Get(JWT_TOKEN_KEY)
 		if token == "" {
-			c.JSON(http.StatusUnauthorized, dto.Fail[string]("未提供Token"))
+			c.JSON(http.StatusUnauthorized, dto.Fail[string]("Authorization token required"))
 			c.Abort()
 			return
 		}
@@ -137,31 +119,35 @@ func JWTAuth() gin.HandlerFunc {
 		j := NewJWT()
 		claims, err := j.ParseToken(token)
 
-		// 统一错误处理
 		if err != nil {
 			status := http.StatusUnauthorized
-			msg := "Token无效"
+			msg := "Invalid token"
 
 			switch {
 			case errors.Is(err, TokenExpired):
-				msg = "Token已过期"
-				now := time.Now().Unix()
-				if claims != nil && now-claims.ExpiresAt.Unix() < claims.BufferTime {
-					newToken, err := j.RefreshToken(token)
-					if err != nil {
-						logrus.Warnf("刷新Token失败: %v", err)
-					} else {
-						c.Header("X-New-Token", newToken)
-						if newClaims, err := j.ParseToken(newToken); err == nil {
-							claims = newClaims
+				// 计算缓冲时间
+				if claims != nil {
+					bufferRemaining := time.Until(claims.ExpiresAt.Add(time.Duration(claims.BufferTime) * time.Second))
+					if bufferRemaining > 0 {
+						newToken, err := j.RefreshToken(token)
+						if err != nil {
+							logrus.Warn("Token refresh failed: ", err)
+							msg = "Token refresh failed"
+						} else {
+							c.Header("X-New-Token", newToken)
+							// 必须更新Claims
+							if newClaims, err := j.ParseToken(newToken); err == nil {
+								claims = newClaims
+							}
 						}
 					}
 				}
+				msg = "Token expired"
 			case errors.Is(err, TokenMalformed):
-				msg = "Token格式错误"
+				msg = "Malformed token"
 			default:
-				logrus.Errorf("JWT解析异常: %v", err)
-				msg = "认证服务不可用"
+				logrus.Error("JWT error: ", err)
+				msg = "Authentication error"
 				status = http.StatusInternalServerError
 			}
 
@@ -170,11 +156,14 @@ func JWTAuth() gin.HandlerFunc {
 			return
 		}
 
-		// 静默刷新（深拷贝claims避免竞态）
-		newClaims := *claims
-		if claims.ExpiresAt.Unix()-time.Now().Unix() < 1800 {
+		// 静默刷新逻辑修复：生成全新Claims（含新过期时间）
+		if time.Until(claims.ExpiresAt.Time) < 30*time.Minute {
+			newClaims := j.CreateClaims(claims.UserDTO) // 生成新Claims
 			if newToken, err := j.CreateTokenByOldToken(token, newClaims); err == nil {
 				c.Header("X-New-Token", newToken)
+				claims = &newClaims // 更新当前请求的Claims
+			} else {
+				logrus.Warnf("静默刷新失败（继续使用旧Token）: %v", err) // 关键点：仅记录不中断
 			}
 		}
 
@@ -185,11 +174,12 @@ func JWTAuth() gin.HandlerFunc {
 
 func (j *JWT) RefreshToken(oldToken string) (string, error) {
 	claims, err := j.ParseToken(oldToken)
-	if err != nil && !errors.Is(err, TokenExpired) {
-		return "", err
+	switch {
+	case err == nil:
+		return j.CreateToken(j.CreateClaims(claims.UserDTO))
+	case errors.Is(err, TokenExpired) && claims != nil:
+		return j.CreateToken(j.CreateClaims(claims.UserDTO))
+	default:
+		return "", errors.New("invalid token for refresh")
 	}
-
-	// 创建新声明（延长有效期）
-	newClaims := j.CreateClaims(claims.UserDTO)
-	return j.CreateToken(newClaims)
 }
