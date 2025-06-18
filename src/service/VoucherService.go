@@ -22,6 +22,7 @@ func (*VoucherService) AddVoucher(voucher *model.Voucher) error {
 	return err
 }
 
+// QueryVoucherOfShop 查询优惠卷
 func (*VoucherService) QueryVoucherOfShop(shopId int64) ([]model.Voucher, error) {
 	var vocherUtils model.Voucher
 	return vocherUtils.QueryVoucherByShop(shopId)
@@ -36,13 +37,13 @@ func (vs *VoucherService) AddSeckillVoucher(voucher *model.Voucher) error {
 		}
 	}()
 
-	// 2. 操作1：写入主表（需修改AddVoucher方法接收tx参数）
+	// 2. 操作1：写入主表
 	if err := voucher.AddVoucher(tx); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("写入主表失败: %w", err)
 	}
 
-	// 3. 操作2：写入秒杀表（需修改AddSeckillVoucher方法接收tx参数）
+	// 3. 操作2：写入秒杀表
 	seckillVoucher := model.SecKillVoucher{
 		VoucherId:  voucher.Id,
 		Stock:      voucher.Stock,
@@ -71,7 +72,7 @@ func (vs *VoucherService) AddSeckillVoucher(voucher *model.Voucher) error {
 			// Redis更新失败时，可通过以下方式补偿：
 			// a. 记录日志并报警
 			logrus.Errorf("Redis缓存更新失败: key=%s, error=%v", redisKey, err)
-			// b. 启动重试机制（示例）
+			// b. 启动重试机制
 			retryUpdateRedis(redisKey, voucher.Stock)
 		}
 	}()

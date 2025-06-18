@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	redisClient "hmdp-Go/src/config/redis"
 	"hmdp-Go/src/dto"
 	"hmdp-Go/src/middleware"
@@ -86,4 +87,83 @@ func (*UserService) Login(loginInfo *dto.LoginFormDto) (string, error) {
 	}
 
 	return token, nil
+}
+
+// Sign 用户签到
+func (s *UserService) Sign(userID int64) error {
+	// 1. 获取当前日期
+	now := time.Now()
+	year, month := now.Year(), now.Month()
+	day := now.Day()
+
+	// 2. 构建Redis Key (sign:userID:yyyyMM)
+	key := fmt.Sprintf("%s%d:%04d%02d", utils.USER_SIGN_KEY, userID, year, month)
+
+	// 3. 设置对应bit位为1（偏移量从0开始）
+	ctx := context.Background()
+	err := redisClient.GetRedisClient().SetBit(ctx, key, int64(day-1), 1).Err()
+	if err != nil {
+		return fmt.Errorf("签到失败: %v", err)
+	}
+
+	return nil
+}
+
+// GetSignCount 获取当月连续签到天数
+func (s *UserService) GetSignCount(userID int64) (int, error) {
+	// 1. 获取当前日期
+	now := time.Now()
+	year, month := now.Year(), now.Month()
+	day := now.Day()
+
+	// 2. 构建Redis Key
+	key := fmt.Sprintf("%s%d:%04d%02d", utils.USER_SIGN_KEY, userID, year, month)
+
+	// 3. 执行BITFIELD命令获取位图数据
+	ctx := context.Background()
+	result, err := redisClient.GetRedisClient().Do(ctx,
+		"BITFIELD", key,
+		"GET", fmt.Sprintf("u%d", day), "0").Int64Slice()
+	if err != nil {
+		return 0, fmt.Errorf("获取签到数据失败: %v", err)
+	}
+
+	if len(result) == 0 || result[0] == 0 {
+		return 0, nil // 无签到记录
+	}
+
+	// 4. 计算连续签到天数
+	num := result[0]
+	count := 0
+	for {
+		if (num & 1) == 0 {
+			break
+		}
+		count++
+		num >>= 1 // Go中无符号右移就是>>
+	}
+
+	return count, nil
+}
+
+// GetSignStatus 获取当月签到状态（返回每日签到情况）
+func (s *UserService) GetSignStatus(userID int64, year int, month time.Month) (map[int]bool, error) {
+	// 1. 构建Key
+	key := fmt.Sprintf("%s%d:%04d%02d", utils.USER_SIGN_KEY, userID, year, month)
+
+	// 2. 获取当月天数
+	daysInMonth := time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
+
+	// 3. 获取所有bit位
+	ctx := context.Background()
+	status := make(map[int]bool, daysInMonth)
+	for day := 1; day <= daysInMonth; day++ {
+		bit, err := redisClient.GetRedisClient().GetBit(ctx, key, int64(day-1)).Result()
+		if err != nil {
+			return nil, fmt.Errorf("获取签到状态失败: %v", err)
+		}
+		status[day] = bit == 1
+	}
+
+	return status, nil
 }

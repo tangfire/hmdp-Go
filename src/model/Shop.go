@@ -1,9 +1,12 @@
 package model
 
 import (
+	"fmt"
 	"github.com/jinzhu/gorm"
 	"hmdp-Go/src/config/mysql"
 	"hmdp-Go/src/utils"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -35,6 +38,27 @@ func (*Shop) TableName() string {
 func (shop *Shop) QueryShopById(id int64) error {
 	err := mysql.GetMysqlDB().Model(shop).Where("id = ?", id).First(shop).Error
 	return err
+}
+
+func (*Shop) QueryShopByIds(ids []int64) ([]Shop, error) {
+	if len(ids) == 0 {
+		return []Shop{}, nil
+	}
+
+	// 1. 构造 FIELD 排序子句
+	idStrs := make([]string, len(ids))
+	for i, id := range ids {
+		idStrs[i] = strconv.FormatInt(id, 10)
+	}
+	order := fmt.Sprintf("FIELD(id,%s)", strings.Join(idStrs, ","))
+
+	// 2. 一次查询
+	var shops []Shop
+	err := mysql.GetMysqlDB().
+		Where("id IN ?", ids).
+		Order(order).
+		Find(&shops).Error
+	return shops, err
 }
 
 func (shop *Shop) SaveShop() error {

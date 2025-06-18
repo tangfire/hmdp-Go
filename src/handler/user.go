@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 	"hmdp-Go/src/dto"
@@ -98,4 +99,37 @@ func (*UserHandler) Info(c *gin.Context) {
 	userInfo.CreateTime = time.Time{}
 	userInfo.UpdateTime = time.Time{}
 	c.JSON(http.StatusOK, dto.OkWithData(userInfo))
+}
+
+// @Description: sign
+// @Router /user/sign [GET]
+func (*UserHandler) sign(c *gin.Context) {
+	userInfo, err := middleware.GetUserInfo(c)
+	if err != nil {
+		logrus.Error("get user info failed!")
+		c.JSON(http.StatusOK, dto.Fail[string]("get user info failed!"))
+	}
+	err = service.UserManager.Sign(userInfo.Id)
+	if err != nil {
+		logrus.Error("sign user failed!")
+		c.JSON(http.StatusOK, dto.Fail[string]("sign user failed!"))
+	}
+	c.JSON(http.StatusOK, dto.OkWithData[string]("签到成功!"))
+}
+
+// @Description: 获取当月连续签到的次数
+// @Router /user/sign/count
+func (*UserHandler) SignCount(c *gin.Context) {
+	userInfo, err := middleware.GetUserInfo(c)
+	if err != nil {
+		logrus.Error("get user info failed!")
+		c.JSON(http.StatusOK, dto.Fail[string]("get user info failed!"))
+	}
+	count, err := service.UserManager.GetSignCount(userInfo.Id)
+	if err != nil {
+		logrus.Error("get user sign count failed!")
+		c.JSON(http.StatusOK, dto.Fail[string]("get user sign count failed!"))
+	}
+	c.JSON(http.StatusOK, dto.OkWithData[string](fmt.Sprintf("get user sign count is %d", count)))
+
 }

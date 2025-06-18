@@ -7,6 +7,7 @@ local orderId = ARGV[3]
 local stockKey = "seckill:stock:" .. voucherId
 local orderKey = "seckill:order:" .. voucherId
 
+-- 判断秒杀库存是否足够
 if tonumber(redis.call("get", stockKey)) <= 0 then
 	-- the stock is not enough
 	return 1

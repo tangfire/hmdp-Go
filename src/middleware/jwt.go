@@ -90,23 +90,51 @@ func (j *JWT) ParseToken(tokenStr string) (*CustomClaims, error) {
 	return nil, TokenInvalid
 }
 
-// 仅用于已认证的路由（确保中间件已设置 claims）
-func GetUserInfo(c *gin.Context) (dto.UserDTO, error) {
-	claims, exists := c.Get("claims")
-	if !exists {
-		// 明确拒绝处理未经验证的请求
-		return dto.UserDTO{}, errors.New("请求未经验证")
-	}
+// 作用于所有请求的 Token 刷新中间件
+func RefreshTokenMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		token := c.Request.Header.Get(JWT_TOKEN_KEY)
+		if token == "" {
+			c.Next()
+			return
+		}
 
-	// 安全地进行类型断言
-	customClaims, ok := claims.(*CustomClaims) // 注意修正拼写: CustomClamis→CustomClaims
-	if !ok {
-		return dto.UserDTO{}, errors.New("claims 类型错误")
-	}
+		j := NewJWT()
+		claims, err := j.ParseToken(token)
 
-	return customClaims.UserDTO, nil
+		// 1. 缓冲期刷新（Token 过期但仍在 BufferTime 内）
+		if errors.Is(err, TokenExpired) && claims != nil {
+			expireTime := claims.ExpiresAt.Time
+			bufferDeadline := expireTime.Add(time.Duration(claims.BufferTime) * time.Second)
+			if time.Now().Before(bufferDeadline) {
+				newToken, refreshErr := j.RefreshToken(token)
+				if refreshErr == nil {
+					c.Header("X-New-Token", newToken)
+					if newClaims, parseErr := j.ParseToken(newToken); parseErr == nil {
+						c.Set("claims", newClaims) // 更新上下文
+					}
+				} else {
+					logrus.Warn("Token refresh failed in buffer period: ", refreshErr)
+				}
+			}
+		}
+
+		// 2. 静默刷新（有效期不足 30 分钟）
+		if err == nil && claims != nil && time.Until(claims.ExpiresAt.Time) < 30*time.Minute {
+			newClaims := j.CreateClaims(claims.UserDTO)
+			if newToken, err := j.CreateTokenByOldToken(token, newClaims); err == nil {
+				c.Header("X-New-Token", newToken)
+				c.Set("claims", newClaims) // 更新上下文
+			} else {
+				logrus.Warnf("Silent refresh failed: %v", err)
+			}
+		}
+
+		c.Next()
+	}
 }
 
+// 仅用于认证路由的 JWT 验证
 func JWTAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := c.Request.Header.Get(JWT_TOKEN_KEY)
@@ -118,31 +146,7 @@ func JWTAuth() gin.HandlerFunc {
 
 		j := NewJWT()
 		claims, err := j.ParseToken(token)
-
-		// Token解析错误处理
 		if err != nil {
-			// 处理Token过期且处于缓冲期的情况
-			if errors.Is(err, TokenExpired) && claims != nil {
-				expireTime := claims.ExpiresAt.Time
-				bufferDeadline := expireTime.Add(time.Duration(claims.BufferTime) * time.Second)
-				bufferRemaining := time.Until(bufferDeadline)
-				if bufferRemaining > 0 {
-					newToken, err := j.RefreshToken(token)
-					if err == nil {
-						// 缓冲期刷新成功
-						c.Header("X-New-Token", newToken)
-						if newClaims, err := j.ParseToken(newToken); err == nil {
-							// 更新claims并继续处理请求
-							c.Set("claims", newClaims)
-							c.Next()
-							return
-						}
-					}
-					logrus.Warn("Token refresh failed: ", err)
-				}
-			}
-
-			// 其他错误情况
 			status := http.StatusUnauthorized
 			msg := "Invalid token"
 			switch {
@@ -161,17 +165,6 @@ func JWTAuth() gin.HandlerFunc {
 			return
 		}
 
-		// 静默刷新逻辑
-		if time.Until(claims.ExpiresAt.Time) < 30*time.Minute {
-			newClaims := j.CreateClaims(claims.UserDTO)
-			if newToken, err := j.CreateTokenByOldToken(token, newClaims); err == nil {
-				c.Header("X-New-Token", newToken)
-				claims = &newClaims // 更新当前请求的Claims
-			} else {
-				logrus.Warnf("Silent refresh failed (continue with old token): %v", err)
-			}
-		}
-
 		c.Set("claims", claims)
 		c.Next()
 	}
@@ -181,7 +174,7 @@ func (j *JWT) RefreshToken(oldToken string) (string, error) {
 	claims, err := j.ParseToken(oldToken)
 	switch {
 	case err == nil:
-		if claims == nil { // 新增保护（防御性编程）
+		if claims == nil {
 			return "", errors.New("nil claims")
 		}
 		return j.CreateToken(j.CreateClaims(claims.UserDTO))
@@ -190,4 +183,19 @@ func (j *JWT) RefreshToken(oldToken string) (string, error) {
 	default:
 		return "", errors.New("invalid token for refresh")
 	}
+}
+
+// 仅用于已认证的路由（确保中间件已设置 claims）
+func GetUserInfo(c *gin.Context) (dto.UserDTO, error) {
+	claims, exists := c.Get("claims")
+	if !exists {
+		return dto.UserDTO{}, errors.New("请求未经验证")
+	}
+
+	customClaims, ok := claims.(*CustomClaims)
+	if !ok {
+		return dto.UserDTO{}, errors.New("claims 类型错误")
+	}
+
+	return customClaims.UserDTO, nil
 }

@@ -9,6 +9,12 @@ import (
 
 const SECKILL_VOUCHER_NAME = "tb_seckill_voucher"
 
+// 定义明确的错误类型
+var (
+	ErrStockNotEnough = errors.New("库存不足")
+	ErrDuplicateOrder = errors.New("请勿重复购买")
+)
+
 type SecKillVoucher struct {
 	VoucherId  int64     `gorm:"primary;column:voucher_id" json:"voucherId"`
 	Stock      int       `gorm:"column:stock" json:"stock"`
@@ -30,17 +36,21 @@ func (sec *SecKillVoucher) QuerySeckillVoucherById(id int64) error {
 	return mysql.GetMysqlDB().Table(sec.TableName()).Where("voucher_id = ?", id).First(sec).Error
 }
 
-// 直接通过库存条件实现乐观锁
+// 扣减库存
 func (sv *SecKillVoucher) DecrVoucherStock(voucherId int64, tx *gorm.DB) error {
-	result := tx.Model(sv).
-		Where("voucher_id = ? AND stock > 0", voucherId).
-		Update("stock", gorm.Expr("stock - 1"))
+	// 判断秒杀库存是否足够
+	result := tx.Exec(`
+		UPDATE tb_seckill_voucher 
+		SET stock = stock - 1 
+		WHERE voucher_id = ? AND stock > 0
+	`, voucherId)
 
 	if result.Error != nil {
 		return result.Error
 	}
-	if result.RowsAffected == 0 { // 核心判断
-		return errors.New("库存不足")
+
+	if result.RowsAffected == 0 {
+		return ErrStockNotEnough
 	}
 	return nil
 }

@@ -48,10 +48,9 @@ func (vo *VoucherOrder) CreateVoucherOrder(tx *gorm.DB) error {
 	return err
 }
 
-func (vo *VoucherOrder) HasPurchasedVoucher(userId, voucherId int64) (bool, error) {
+func (vo *VoucherOrder) HasPurchasedVoucher(userId, voucherId int64, tx *gorm.DB) (bool, error) {
 	var count int64
-	err := mysql.GetMysqlDB().
-		Table(vo.TableName()).
+	err := tx.Table(vo.TableName()).
 		Where("user_id = ? AND voucher_id = ?", userId, voucherId).
 		Count(&count).Error
 	return count > 0, err

@@ -7,6 +7,8 @@ import (
 )
 
 func ConfigRouter(r *gin.Engine) {
+	// 注册全局 Token 刷新中间件（所有请求都会经过）
+	r.Use(middleware.RefreshTokenMiddleware())
 	r.GET("/ping", func(ctx *gin.Context) {
 		ctx.JSON(http.StatusOK, "pong")
 	})
@@ -17,6 +19,8 @@ func ConfigRouter(r *gin.Engine) {
 		userController.POST("/logout", userHandler.Logout)
 		userController.GET("/me", userHandler.Me)
 		userController.GET("/info/:id", userHandler.Info)
+		userController.GET("/sign", userHandler.sign)
+		userController.GET("/sign/count", userHandler.SignCount)
 	}
 
 	userControllerWithOutMid := r.Group("/user")

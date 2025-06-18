@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/jinzhu/gorm"
 	redisConfig "github.com/redis/go-redis/v9"
 	"hmdp-Go/src/config/mysql"
@@ -330,4 +331,65 @@ func (*ShopService) SyncUpdateCache() {
 			continue
 		}
 	}
+}
+
+// 查询店铺列表（支持地理位置排序）
+func (s *ShopService) QueryShopByType(typeID, current int,
+	x, y float64) ([]model.Shop, error) {
+
+	// 1. 无坐标，按类型分页查询
+	if x == 0 || y == 0 {
+		return new(model.Shop).QueryShopByType(typeID, current)
+	}
+
+	const pageSize = utils.DEFAULTPAGESIZE
+	from := (current - 1) * pageSize
+	to := current * pageSize // slice 上界（开区间）
+
+	key := utils.SHOP_GEO_KEY + strconv.Itoa(typeID)
+
+	// 2. Redis GEO 查询
+	query := &redisConfig.GeoSearchLocationQuery{
+		GeoSearchQuery: redisConfig.GeoSearchQuery{
+			Longitude:  x,
+			Latitude:   y,
+			Radius:     5000, // 5km
+			RadiusUnit: "m",
+			Sort:       "ASC",
+			Count:      to, // 先取够 “当前页” 之前的全部数据
+		},
+		WithDist: true, // 让 Redis 返回距离
+	}
+
+	ctx := context.Background()
+	locs, err := redisClient.GetRedisClient().
+		GeoSearchLocation(ctx, key, query).Result()
+	if err != nil && err != redisConfig.Nil {
+		return nil, fmt.Errorf("Redis GEO 查询失败: %w", err)
+	}
+	if len(locs) == 0 || len(locs) <= from {
+		return []model.Shop{}, nil // 空页
+	}
+
+	// 3. 截取当前页，收集 id & 距离
+	if to > len(locs) {
+		to = len(locs)
+	}
+	ids := make([]int64, 0, to-from)
+	dist := make(map[int64]float64, to-from)
+	for _, loc := range locs[from:to] {
+		id, _ := strconv.ParseInt(loc.Name, 10, 64)
+		ids = append(ids, id)
+		dist[id] = loc.Dist
+	}
+
+	// 4. 数据库一次性查询
+	shops, err := new(model.Shop).QueryShopByIds(ids)
+	if err != nil {
+		return nil, fmt.Errorf("数据库查询失败: %w", err)
+	}
+	for i := range shops {
+		shops[i].Distance = dist[shops[i].Id] // ⚠️ 字段是 Id
+	}
+	return shops, nil
 }

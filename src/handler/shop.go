@@ -113,7 +113,28 @@ func (*ShopHandler) QueryShopByType(c *gin.Context) {
 		return
 	}
 
-	shops, err := service.ShopManager.QueryByType(typeId, current)
+	xStr := c.Query("x")
+	yStr := c.Query("y")
+	if xStr == "" {
+		xStr = "0"
+	}
+	if yStr == "" {
+		yStr = "0"
+	}
+	x, err := strconv.ParseFloat(xStr, 64)
+	if err != nil {
+		logrus.Error("xStr or yStr is not a number")
+		c.JSON(http.StatusOK, dto.Fail[string]("xStr or yStr is not a number"))
+		return
+	}
+	y, err := strconv.ParseFloat(yStr, 64)
+	if err != nil {
+		logrus.Error("yStr is not a number")
+		c.JSON(http.StatusOK, dto.Fail[string]("yStr is not a number"))
+		return
+	}
+
+	shops, err := service.ShopManager.QueryShopByType(typeId, current, x, y)
 	if err != nil {
 		logrus.Error("not find shop!")
 		c.JSON(http.StatusOK, dto.Fail[string]("not find shop!"))
