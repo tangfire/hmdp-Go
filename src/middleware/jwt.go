@@ -123,7 +123,9 @@ func JWTAuth() gin.HandlerFunc {
 		if err != nil {
 			// 处理Token过期且处于缓冲期的情况
 			if errors.Is(err, TokenExpired) && claims != nil {
-				bufferRemaining := time.Until(claims.ExpiresAt.Add(time.Duration(claims.BufferTime) * time.Second))
+				expireTime := claims.ExpiresAt.Time
+				bufferDeadline := expireTime.Add(time.Duration(claims.BufferTime) * time.Second)
+				bufferRemaining := time.Until(bufferDeadline)
 				if bufferRemaining > 0 {
 					newToken, err := j.RefreshToken(token)
 					if err == nil {
@@ -179,6 +181,9 @@ func (j *JWT) RefreshToken(oldToken string) (string, error) {
 	claims, err := j.ParseToken(oldToken)
 	switch {
 	case err == nil:
+		if claims == nil { // 新增保护（防御性编程）
+			return "", errors.New("nil claims")
+		}
 		return j.CreateToken(j.CreateClaims(claims.UserDTO))
 	case errors.Is(err, TokenExpired) && claims != nil:
 		return j.CreateToken(j.CreateClaims(claims.UserDTO))
