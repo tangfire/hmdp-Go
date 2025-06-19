@@ -24,9 +24,9 @@ type JWT struct {
 }
 
 const (
-	JWT_SERCRET_KEY = "hmdp key"
-	JWT_ISSUER      = "loser"
-	JWT_TOKEN_KEY   = "authorization"
+	JWT_SECRET_KEY = "hmdp key" // 修正拼写错误：SERCRET -> SECRET
+	JWT_ISSUER     = "loser"
+	JWT_TOKEN_KEY  = "authorization"
 )
 
 var (
@@ -38,7 +38,7 @@ var (
 
 func NewJWT() *JWT {
 	return &JWT{
-		[]byte(JWT_SERCRET_KEY),
+		[]byte(JWT_SECRET_KEY),
 	}
 }
 
@@ -56,8 +56,8 @@ func (j *JWT) CreateClaims(userInfo dto.UserDTO) CustomClaims {
 	}
 }
 
-func (j *JWT) CreateToken(clamis CustomClaims) (string, error) {
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, clamis)
+func (j *JWT) CreateToken(claims CustomClaims) (string, error) {
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString(j.SigningKey)
 }
 
@@ -90,8 +90,14 @@ func (j *JWT) ParseToken(tokenStr string) (*CustomClaims, error) {
 	return nil, TokenInvalid
 }
 
-// 作用于所有请求的 Token 刷新中间件
-func RefreshTokenMiddleware() gin.HandlerFunc {
+// RefreshTokenWithControl 统一刷新方法（带并发控制）
+func (j *JWT) RefreshTokenWithControl(oldToken string, userDTO dto.UserDTO) (string, error) {
+	newClaims := j.CreateClaims(userDTO)
+	return j.CreateTokenByOldToken(oldToken, newClaims)
+}
+
+// GlobalTokenMiddleware 全局中间件：处理所有请求的Token解析和刷新
+func GlobalTokenMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := c.Request.Header.Get(JWT_TOKEN_KEY)
 		if token == "" {
@@ -102,90 +108,70 @@ func RefreshTokenMiddleware() gin.HandlerFunc {
 		j := NewJWT()
 		claims, err := j.ParseToken(token)
 
-		// 1. 缓冲期刷新（Token 过期但仍在 BufferTime 内）
+		// 统一刷新处理函数
+		refreshToken := func() {
+			if claims == nil {
+				logrus.Warn("Refresh attempted with nil claims")
+				return
+			}
+
+			newToken, refreshErr := j.RefreshTokenWithControl(token, claims.UserDTO)
+			if refreshErr == nil {
+				c.Header("X-New-Token", newToken)
+				c.Request.Header.Set(JWT_TOKEN_KEY, newToken)
+
+				// 更新上下文
+				if newClaims, parseErr := j.ParseToken(newToken); parseErr == nil {
+					c.Set("claims", newClaims)
+					logrus.Info("Token refreshed")
+				} else {
+					logrus.Warn("Failed to parse new token: ", parseErr)
+				}
+			} else {
+				logrus.Warn("Token refresh failed: ", refreshErr)
+			}
+		}
+
+		// 1. 缓冲期刷新（Token过期但在缓冲期内）
 		if errors.Is(err, TokenExpired) && claims != nil {
 			expireTime := claims.ExpiresAt.Time
 			bufferDeadline := expireTime.Add(time.Duration(claims.BufferTime) * time.Second)
 			if time.Now().Before(bufferDeadline) {
-				newToken, refreshErr := j.RefreshToken(token)
-				if refreshErr == nil {
-					c.Header("X-New-Token", newToken)
-					if newClaims, parseErr := j.ParseToken(newToken); parseErr == nil {
-						c.Set("claims", newClaims) // 更新上下文
-					}
-				} else {
-					logrus.Warn("Token refresh failed in buffer period: ", refreshErr)
-				}
+				refreshToken()
 			}
-		}
-
-		// 2. 静默刷新（有效期不足 30 分钟）
-		if err == nil && claims != nil && time.Until(claims.ExpiresAt.Time) < 30*time.Minute {
-			newClaims := j.CreateClaims(claims.UserDTO)
-			if newToken, err := j.CreateTokenByOldToken(token, newClaims); err == nil {
-				c.Header("X-New-Token", newToken)
-				c.Set("claims", newClaims) // 更新上下文
-			} else {
-				logrus.Warnf("Silent refresh failed: %v", err)
-			}
+		} else if err == nil && claims != nil && time.Until(claims.ExpiresAt.Time) < 30*time.Minute {
+			// 2. 静默刷新（有效期不足30分钟）
+			refreshToken()
+		} else if err == nil && claims != nil {
+			// 3. 有效token直接设置上下文
+			c.Set("claims", claims)
 		}
 
 		c.Next()
 	}
 }
 
-// 仅用于认证路由的 JWT 验证
-func JWTAuth() gin.HandlerFunc {
+// AuthRequired 认证中间件：仅用于需要登录的路由
+func AuthRequired() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		token := c.Request.Header.Get(JWT_TOKEN_KEY)
-		if token == "" {
-			c.JSON(http.StatusUnauthorized, dto.Fail[string]("Authorization token required"))
+		claims, exists := c.Get("claims")
+		if !exists || claims == nil {
+			c.JSON(http.StatusUnauthorized, dto.Fail[string]("请先登录"))
 			c.Abort()
 			return
 		}
 
-		j := NewJWT()
-		claims, err := j.ParseToken(token)
-		if err != nil {
-			status := http.StatusUnauthorized
-			msg := "Invalid token"
-			switch {
-			case errors.Is(err, TokenExpired):
-				msg = "Token expired"
-			case errors.Is(err, TokenMalformed):
-				msg = "Malformed token"
-			default:
-				logrus.Error("JWT error: ", err)
-				msg = "Authentication error"
-				status = http.StatusInternalServerError
-			}
-
-			c.JSON(status, dto.Fail[string](msg))
+		if _, ok := claims.(*CustomClaims); !ok {
+			c.JSON(http.StatusUnauthorized, dto.Fail[string]("无效的用户凭证"))
 			c.Abort()
 			return
 		}
 
-		c.Set("claims", claims)
 		c.Next()
 	}
 }
 
-func (j *JWT) RefreshToken(oldToken string) (string, error) {
-	claims, err := j.ParseToken(oldToken)
-	switch {
-	case err == nil:
-		if claims == nil {
-			return "", errors.New("nil claims")
-		}
-		return j.CreateToken(j.CreateClaims(claims.UserDTO))
-	case errors.Is(err, TokenExpired) && claims != nil:
-		return j.CreateToken(j.CreateClaims(claims.UserDTO))
-	default:
-		return "", errors.New("invalid token for refresh")
-	}
-}
-
-// 仅用于已认证的路由（确保中间件已设置 claims）
+// GetUserInfo 获取用户信息（用于业务处理）
 func GetUserInfo(c *gin.Context) (dto.UserDTO, error) {
 	claims, exists := c.Get("claims")
 	if !exists {
