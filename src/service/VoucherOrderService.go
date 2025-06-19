@@ -43,6 +43,7 @@ func InitOrderHandler() {
 }
 
 func (vo *VoucherOrderService) SeckillVoucher(voucherId int64, userId int64) error {
+
 	orderId, err := utils.RedisWork.NextId("order")
 	if err != nil {
 		return err

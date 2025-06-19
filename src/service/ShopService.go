@@ -20,6 +20,8 @@ type ShopService struct {
 
 var ShopManager *ShopService
 
+var distLock *utils.DistributedLock
+
 const (
 	MAX_REDIS_DATA_QUEUE = 10
 )
@@ -28,6 +30,7 @@ var redisDataQueue chan int64
 
 func init() {
 	redisDataQueue = make(chan int64, MAX_REDIS_DATA_QUEUE)
+	distLock = utils.NewDistributedLock(redisClient.GetRedisClient())
 	go ShopManager.SyncUpdateCache()
 }
 
@@ -203,8 +206,12 @@ func (*ShopService) QueryShopByIdPassThrough(id int64) (model.Shop, error) {
 
 	if errors.Is(err, redisConfig.Nil) {
 		lockKey := utils.CACHE_LOCK_KEY + strconv.FormatInt(id, 10)
+		ctx := context.Background()
+		flag, token, err := distLock.Lock(ctx, lockKey, 10*time.Second)
+		if err != nil {
+			return model.Shop{}, err
+		}
 
-		flag := utils.RedisUtil.TryLock(lockKey)
 		// 没有获取到锁
 		if !flag {
 			time.Sleep(time.Millisecond * 50)
@@ -212,7 +219,7 @@ func (*ShopService) QueryShopByIdPassThrough(id int64) (model.Shop, error) {
 		}
 
 		// 重新建立缓存
-		defer utils.RedisUtil.ClearLock(lockKey)
+		defer distLock.Unlock(ctx, lockKey, token)
 		var shopInfo model.Shop
 		err = shopInfo.QueryShopById(id)
 
@@ -270,7 +277,11 @@ func (*ShopService) QueryShopByIdWithLogicExpire(id int64) (model.Shop, error) {
 		// 否则过期,需要重新建立缓存
 
 		lockKey := utils.CACHE_LOCK_KEY + strconv.FormatInt(id, 10)
-		flag := utils.RedisUtil.TryLock(lockKey)
+		ctx := context.Background()
+		flag, token, err := distLock.Lock(ctx, lockKey, 10*time.Second)
+		if err != nil {
+			return model.Shop{}, err
+		}
 
 		// if not get the lock
 		if !flag {
@@ -278,7 +289,7 @@ func (*ShopService) QueryShopByIdWithLogicExpire(id int64) (model.Shop, error) {
 		}
 
 		// if get the lock
-		defer utils.RedisUtil.ClearLock(lockKey)
+		defer distLock.Unlock(ctx, lockKey, token)
 		redisDataQueue <- id
 		// go func() {
 		// 	var shopInfo model.Shop
