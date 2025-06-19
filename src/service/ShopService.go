@@ -60,6 +60,7 @@ func (*ShopService) QueryByName(name string, current int) ([]model.Shop, error) 
 	return shops, err
 }
 
+// QueryShopByIdWithCache 如果缓存未命中，则查询数据库，将数据库结果写入缓存，并设置超时时间
 func (*ShopService) QueryShopByIdWithCache(id int64) (model.Shop, error) {
 	redisKey := utils.CACHE_SHOP_KEY + strconv.FormatInt(id, 10)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -75,7 +76,7 @@ func (*ShopService) QueryShopByIdWithCache(id int64) (model.Shop, error) {
 		return shop, nil
 	}
 
-	if err == redisConfig.Nil {
+	if errors.Is(err, redisConfig.Nil) {
 		var shop model.Shop
 		shop.Id = id
 		err = shop.QueryShopById(id)
@@ -89,7 +90,7 @@ func (*ShopService) QueryShopByIdWithCache(id int64) (model.Shop, error) {
 		}
 
 		// 超时剔除策略
-		err = redisClient.GetRedisClient().Set(ctx, redisKey, string(redisValue), time.Duration(time.Minute)).Err()
+		err = redisClient.GetRedisClient().Set(ctx, redisKey, string(redisValue), time.Minute).Err()
 
 		if err != nil {
 			return model.Shop{}, err
@@ -100,7 +101,7 @@ func (*ShopService) QueryShopByIdWithCache(id int64) (model.Shop, error) {
 	return model.Shop{}, err
 }
 
-// 缓存更新的最佳实践方法
+// UpdateShopWithCacheCallBack 缓存更新的最佳实践方法
 func (*ShopService) UpdateShopWithCacheCallBack(db *gorm.DB, shop *model.Shop) error {
 	return db.Transaction(func(tx *gorm.DB) error {
 		err := shop.QueryShopById(shop.Id)
@@ -159,7 +160,7 @@ func (*ShopService) QueryShopByIdWithCacheNull(id int64) (model.Shop, error) {
 		shopInfo.Id = id
 		err = shopInfo.QueryShopById(id)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			err = redisClient.GetRedisClient().Set(ctx, redisKey, "", time.Duration(time.Minute)).Err()
+			err = redisClient.GetRedisClient().Set(ctx, redisKey, "", time.Minute).Err()
 			if err != nil {
 				return model.Shop{}, err
 			}
@@ -170,7 +171,7 @@ func (*ShopService) QueryShopByIdWithCacheNull(id int64) (model.Shop, error) {
 		if err != nil {
 			return model.Shop{}, err
 		}
-		err = redisClient.GetRedisClient().Set(ctx, redisKey, string(redisValue), time.Duration(time.Minute)).Err()
+		err = redisClient.GetRedisClient().Set(ctx, redisKey, string(redisValue), time.Minute).Err()
 		if err != nil {
 			return model.Shop{}, err
 		}
