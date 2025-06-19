@@ -7,6 +7,7 @@ import (
 	"hmdp-Go/src/service"
 	"net/http"
 	"strconv"
+	"time"
 )
 
 type VoucherOrderHandler struct {
@@ -17,6 +18,7 @@ var voucherOrderHandler *VoucherOrderHandler
 // @Description: get the voucher id
 // @Router: /voucher-order/seckill/:id
 func (*VoucherOrderHandler) SeckillVoucher(c *gin.Context) {
+
 	idStr := c.Param("id")
 	if idStr == "" {
 		c.JSON(http.StatusOK, dto.Fail[string]("the id is empty!"))
@@ -28,6 +30,19 @@ func (*VoucherOrderHandler) SeckillVoucher(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusOK, dto.Fail[string]("type transform failed!"))
 		return
+	}
+
+	voucher, err := service.SecKillManager.QuerySeckillVoucherById(id)
+	if err != nil {
+		c.JSON(http.StatusOK, dto.Fail[string](err.Error()))
+	}
+
+	if voucher.BeginTime.After(time.Now()) {
+		c.JSON(http.StatusOK, dto.Fail[string]("秒杀尚外开始!"))
+	}
+
+	if voucher.EndTime.Before(time.Now()) {
+		c.JSON(http.StatusOK, dto.Fail[string]("秒杀已经结束!"))
 	}
 
 	userInfo, err := middleware.GetUserInfo(c)
