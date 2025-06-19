@@ -69,7 +69,7 @@ func (vo *VoucherOrderService) SeckillVoucher(voucherId int64, userId int64) err
 	return nil
 }
 
-// 处理消息队列的goroutine
+// SyncHandlerStream 处理消息队列的goroutine
 func SyncHandlerStream() {
 	ctx := context.Background()
 	for {
@@ -82,7 +82,7 @@ func SyncHandlerStream() {
 		}).Result()
 
 		if err != nil {
-			if err == redisConfig.Nil {
+			if errors.Is(err, redisConfig.Nil) {
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
@@ -120,7 +120,7 @@ func handlePendingList() {
 		}).Result()
 
 		if err != nil {
-			if err == redisConfig.Nil {
+			if errors.Is(err, redisConfig.Nil) {
 				time.Sleep(1 * time.Second)
 				continue
 			}

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	redisConfig "github.com/redis/go-redis/v9"
 	redisClient "hmdp-Go/src/config/redis"
 	"hmdp-Go/src/model"
@@ -36,29 +37,28 @@ func (*ShopTypeService) QueryShopTypeListWithCache() ([]model.ShopType, error) {
 		return shoplist, nil
 	}
 
-	if err != nil {
-		if err == redisConfig.Nil {
-			var shoplist []model.ShopType
-			var shopTypeUtils model.ShopType
-			shoplist, err = shopTypeUtils.QueryTypeList()
-			if err != nil {
-				return []model.ShopType{}, nil
-			}
-
-			redisValue, err := json.Marshal(shoplist)
-			if err != nil {
-				return []model.ShopType{}, err
-			}
-
-			err = redisClient.GetRedisClient().Set(ctx, redisKey, string(redisValue), 0).Err()
-
-			if err != nil {
-				return []model.ShopType{}, err
-			}
-
-			return shoplist, err
+	if errors.Is(err, redisConfig.Nil) {
+		var shoplist []model.ShopType
+		var shopTypeUtils model.ShopType
+		shoplist, err = shopTypeUtils.QueryTypeList()
+		if err != nil {
+			return []model.ShopType{}, nil
 		}
+
+		redisValue, err := json.Marshal(shoplist)
+		if err != nil {
+			return []model.ShopType{}, err
+		}
+
+		err = redisClient.GetRedisClient().Set(ctx, redisKey, string(redisValue), 0).Err()
+
+		if err != nil {
+			return []model.ShopType{}, err
+		}
+
+		return shoplist, err
 	}
+
 	return []model.ShopType{}, err
 }
 

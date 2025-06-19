@@ -134,7 +134,7 @@ func (*ShopService) UpdateShopWithCache(shop *model.Shop) error {
 	return ShopManager.UpdateShopWithCacheCallBack(mysql.GetMysqlDB(), shop)
 }
 
-// 缓存穿透的解决方法: 缓存空对象
+// QueryShopByIdWithCacheNull 缓存穿透的解决方法: 缓存空对象
 func (*ShopService) QueryShopByIdWithCacheNull(id int64) (model.Shop, error) {
 	redisKey := utils.CACHE_SHOP_KEY + strconv.FormatInt(id, 10)
 
@@ -155,7 +155,7 @@ func (*ShopService) QueryShopByIdWithCacheNull(id int64) (model.Shop, error) {
 		return shopInfo, nil
 	}
 
-	if err == redisConfig.Nil {
+	if errors.Is(err, redisConfig.Nil) {
 		var shopInfo model.Shop
 		shopInfo.Id = id
 		err = shopInfo.QueryShopById(id)
@@ -180,7 +180,7 @@ func (*ShopService) QueryShopByIdWithCacheNull(id int64) (model.Shop, error) {
 	return model.Shop{}, nil
 }
 
-// 利用互斥锁解决热点 Key 问题(也就是缓存击穿问题)
+// QueryShopByIdPassThrough 利用互斥锁解决热点 Key 问题(也就是缓存击穿问题)
 func (*ShopService) QueryShopByIdPassThrough(id int64) (model.Shop, error) {
 	redisKey := utils.CACHE_SHOP_KEY + strconv.FormatInt(id, 10)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -201,8 +201,9 @@ func (*ShopService) QueryShopByIdPassThrough(id int64) (model.Shop, error) {
 		return shopInfo, err
 	}
 
-	if err == redisConfig.Nil {
+	if errors.Is(err, redisConfig.Nil) {
 		lockKey := utils.CACHE_LOCK_KEY + strconv.FormatInt(id, 10)
+
 		flag := utils.RedisUtil.TryLock(lockKey)
 		// 没有获取到锁
 		if !flag {
@@ -248,7 +249,7 @@ func (*ShopService) QueryShopByIdWithLogicExpire(id int64) (model.Shop, error) {
 	redisDataStr, err := redisClient.GetRedisClient().Get(ctx, redisKey).Result()
 
 	// hot key is in redis
-	if err == redisConfig.Nil {
+	if errors.Is(err, redisConfig.Nil) {
 		return model.Shop{}, nil
 	}
 
@@ -365,7 +366,7 @@ func (s *ShopService) QueryShopByType(typeID, current int,
 	ctx := context.Background()
 	locs, err := redisClient.GetRedisClient().
 		GeoSearchLocation(ctx, key, query).Result()
-	if err != nil && err != redisConfig.Nil {
+	if err != nil && !errors.Is(err, redisConfig.Nil) {
 		return nil, fmt.Errorf("Redis GEO 查询失败: %w", err)
 	}
 	if len(locs) == 0 || len(locs) <= from {
