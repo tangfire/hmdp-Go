@@ -24,7 +24,7 @@ type JWT struct {
 }
 
 const (
-	JWT_SECRET_KEY = "hmdp key"
+	JWT_SECRET_KEY = "hmdp key" // 修正拼写错误：SERCRET -> SECRET
 	JWT_ISSUER     = "loser"
 	JWT_TOKEN_KEY  = "authorization"
 )
@@ -108,9 +108,6 @@ func GlobalTokenMiddleware() gin.HandlerFunc {
 		j := NewJWT()
 		claims, err := j.ParseToken(token)
 
-		// 关键修复：只有有效的claims才应被设置到上下文
-		validClaims := false
-
 		// 统一刷新处理函数
 		refreshToken := func() {
 			if claims == nil {
@@ -126,7 +123,6 @@ func GlobalTokenMiddleware() gin.HandlerFunc {
 				// 更新上下文
 				if newClaims, parseErr := j.ParseToken(newToken); parseErr == nil {
 					c.Set("claims", newClaims)
-					validClaims = true
 					logrus.Info("Token refreshed")
 				} else {
 					logrus.Warn("Failed to parse new token: ", parseErr)
@@ -143,35 +139,16 @@ func GlobalTokenMiddleware() gin.HandlerFunc {
 			if time.Now().Before(bufferDeadline) {
 				refreshToken()
 			}
-		} else if err == nil && claims != nil {
+		} else if err == nil && claims != nil && time.Until(claims.ExpiresAt.Time) < 30*time.Minute {
 			// 2. 静默刷新（有效期不足30分钟）
-			if time.Until(claims.ExpiresAt.Time) < 30*time.Minute {
-				refreshToken()
-			} else {
-				// 3. 有效token直接设置上下文
-				c.Set("claims", claims)
-				validClaims = true
-			}
-		}
-
-		// 关键修复：记录无效token情况
-		if !validClaims && err != nil {
-			logrus.WithFields(logrus.Fields{
-				"error": err,
-				"token": maskToken(token), // 安全记录token
-			}).Debug("Invalid token detected")
+			refreshToken()
+		} else if err == nil && claims != nil {
+			// 3. 有效token直接设置上下文
+			c.Set("claims", claims)
 		}
 
 		c.Next()
 	}
-}
-
-// 安全地记录token（只显示部分内容）
-func maskToken(token string) string {
-	if len(token) < 10 {
-		return "***"
-	}
-	return token[:4] + "..." + token[len(token)-4:]
 }
 
 // AuthRequired 认证中间件：仅用于需要登录的路由
