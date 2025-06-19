@@ -12,6 +12,7 @@ const (
 	SHOP_GEO_KEY         = "shop:geo:"
 	USER_SIGN_KEY        = "sign:"
 	DISTRIBUTED_LOCK_KEY = "lock:voucher:"
+	UVKeyPrefix          = "uv:"
 )
 
 const (

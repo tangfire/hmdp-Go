@@ -9,6 +9,8 @@ import (
 func ConfigRouter(r *gin.Engine) {
 	// 注册全局 Token 刷新中间件（所有请求都会经过）
 	r.Use(middleware.RefreshTokenMiddleware())
+	// 添加UV统计中间件（应用到所有路由）
+	r.Use(middleware.UVStatisticsMiddleware())
 	r.GET("/ping", func(ctx *gin.Context) {
 		ctx.JSON(http.StatusOK, "pong")
 	})
@@ -89,6 +91,13 @@ func ConfigRouter(r *gin.Engine) {
 	{
 		uploadController.POST("/blog", uploadHandler.UploadImage)
 		uploadController.GET("/blog/delete", uploadHandler.DeleteBlogImg)
+	}
+
+	// 添加统计路由
+	statisticsGroup := r.Group("/statistics")
+	{
+		statisticsGroup.GET("/uv", statisticsHandler.QueryUV)
+		statisticsGroup.GET("/uv/current", statisticsHandler.QueryCurrentUV)
 	}
 
 }
