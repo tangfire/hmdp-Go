@@ -44,6 +44,17 @@ func InitOrderHandler() {
 
 func (vo *VoucherOrderService) SeckillVoucher(voucherId int64, userId int64) error {
 
+	voucher, err := SecKillManager.QuerySeckillVoucherById(voucherId)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	if now.Before(voucher.BeginTime) {
+		return errors.New("秒杀尚未开始")
+	}
+	if now.After(voucher.EndTime) {
+		return errors.New("秒杀已结束")
+	}
 	orderId, err := utils.RedisWork.NextId("order")
 	if err != nil {
 		return err
