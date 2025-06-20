@@ -1,6 +1,7 @@
 package model
 
 import (
+	"gorm.io/gorm/clause"
 	"hmdp-Go/src/config/mysql"
 	"time"
 )
@@ -37,6 +38,12 @@ func (user *User) SaveUser() error {
 
 func (user *User) GetUsersByIds(ids []int64) ([]User, error) {
 	var users []User
-	err := mysql.GetMysqlDB().Table(user.TableName()).Where("id IN (?)", ids).Find(&users).Error
+
+	err := mysql.GetMysqlDB().
+		Table(user.TableName()).
+		Where("id IN ?", ids).
+		Order(clause.Expr{SQL: "FIELD(id, ?)", Vars: []interface{}{ids}, WithoutParentheses: false}).
+		Find(&users).Error
+
 	return users, err
 }

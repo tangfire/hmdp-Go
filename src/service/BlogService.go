@@ -145,6 +145,7 @@ func (*BlogService) GetBlogById(id int64) (model.Blog, error) {
 	return blog, err
 }
 
+// QueryUserLike 查询点赞该博客最早的5个用户
 func (*BlogService) QueryUserLike(id int64) ([]dto.UserDTO, error) {
 	// get the redis key
 	redisKey := utils.BLOG_LIKE_KEY + strconv.FormatInt(id, 10)

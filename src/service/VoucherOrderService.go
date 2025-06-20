@@ -237,56 +237,46 @@ func handleFailedMessage(msg redisConfig.XMessage, err error) {
 	}
 }
 
-// 处理优惠券消息
+// 处理优惠券消息(使用自动看门狗的锁)
 func processVoucherMessage(msg redisConfig.XMessage) error {
 	var order model.VoucherOrder
 	if err := mapstructure.Decode(msg.Values, &order); err != nil {
-		logrus.Warnf("消息解析失败: %v", err)
 		return err
 	}
+
+	lockKey := fmt.Sprintf("lock:order:%d", order.UserId)
+	lock := utils.NewDistributedLock(redisClient.GetRedisClient())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// 使用自动管理看门狗的锁
+	acquired, token, err := lock.LockWithWatchDog(ctx, lockKey, 10*time.Second)
+	if err != nil || !acquired {
+		return errors.New("系统繁忙，请重试")
+	}
+	defer lock.UnlockWithWatchDog(ctx, lockKey, token)
+
 	return createVoucherOrder(order)
 }
 
 // 创建优惠券订单
 func createVoucherOrder(order model.VoucherOrder) error {
-
-	lockKey := fmt.Sprintf("%s%d", utils.DISTRIBUTED_LOCK_KEY, order.VoucherId)
-	lock := utils.NewDistributedLock(redisClient.GetRedisClient())
-
-	// 获取分布式锁
-	// 修改后的锁获取
-	// 使用带超时的上下文 ✅
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel() // 确保释放资源
-	acquired, token, err := lock.Lock(ctx, lockKey, 10*time.Second)
-	if err != nil || !acquired {
-		return errors.New("系统繁忙，请重试")
-	}
-	defer lock.Unlock(ctx, lockKey, token) // 传入令牌
-
-	// 启动看门狗
-	stopChan := make(chan struct{})
-	defer close(stopChan)
-	go lock.WatchDog(ctx, lockKey, token, 10*time.Second, stopChan)
-
+	// 直接执行事务，无需加锁
 	return mysql.GetMysqlDB().Transaction(func(tx *gorm.DB) error {
-		// 1. 检查是否已购买
-		//查询订单（历史订单检查）
+		// 保留一人一单检查（锁已保证安全，此检查可防极端情况）
 		purchasedFlag, err := new(model.VoucherOrder).HasPurchasedVoucher(order.UserId, order.VoucherId, tx)
-		if err != nil {
-			return err
-		}
-		if purchasedFlag {
+		if err != nil || purchasedFlag {
 			return model.ErrDuplicateOrder
 		}
 
-		// 2. 扣减库存
+		// 扣减库存
 		var sv model.SecKillVoucher
 		if err := sv.DecrVoucherStock(order.VoucherId, tx); err != nil {
 			return err
 		}
 
-		// 3. 创建订单
+		// 创建订单
 		order.CreateTime = time.Now()
 		order.UpdateTime = time.Now()
 		return order.CreateVoucherOrder(tx)

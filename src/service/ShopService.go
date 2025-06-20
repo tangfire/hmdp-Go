@@ -207,7 +207,7 @@ func (*ShopService) QueryShopByIdPassThrough(id int64) (model.Shop, error) {
 	if errors.Is(err, redisConfig.Nil) {
 		lockKey := utils.CACHE_LOCK_KEY + strconv.FormatInt(id, 10)
 		ctx := context.Background()
-		flag, token, err := distLock.Lock(ctx, lockKey, 10*time.Second)
+		flag, token, err := distLock.LockWithWatchDog(ctx, lockKey, 10*time.Second)
 		if err != nil {
 			return model.Shop{}, err
 		}
@@ -219,7 +219,7 @@ func (*ShopService) QueryShopByIdPassThrough(id int64) (model.Shop, error) {
 		}
 
 		// 重新建立缓存
-		defer distLock.Unlock(ctx, lockKey, token)
+		defer distLock.UnlockWithWatchDog(ctx, lockKey, token)
 		var shopInfo model.Shop
 		err = shopInfo.QueryShopById(id)
 
@@ -278,7 +278,7 @@ func (*ShopService) QueryShopByIdWithLogicExpire(id int64) (model.Shop, error) {
 
 		lockKey := utils.CACHE_LOCK_KEY + strconv.FormatInt(id, 10)
 		ctx := context.Background()
-		flag, token, err := distLock.Lock(ctx, lockKey, 10*time.Second)
+		flag, token, err := distLock.LockWithWatchDog(ctx, lockKey, 10*time.Second)
 		if err != nil {
 			return model.Shop{}, err
 		}
@@ -289,7 +289,7 @@ func (*ShopService) QueryShopByIdWithLogicExpire(id int64) (model.Shop, error) {
 		}
 
 		// if get the lock
-		defer distLock.Unlock(ctx, lockKey, token)
+		defer distLock.UnlockWithWatchDog(ctx, lockKey, token)
 		redisDataQueue <- id
 		// go func() {
 		// 	var shopInfo model.Shop
