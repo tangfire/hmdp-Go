@@ -24,6 +24,12 @@ type VoucherOrderService struct {
 var VoucherOrderManager *VoucherOrderService
 var voucherScript *redisConfig.Script
 
+// 最大重试次数配置
+const (
+	maxRetries = 3
+	retryTTL   = 24 * time.Hour
+)
+
 func init() {
 	script, _ := ioutil.ReadFile("script/voucher_script.lua")
 	voucherScript = redisConfig.NewScript(string(script))
@@ -109,7 +115,9 @@ func SyncHandlerStream() {
 
 		for _, msg := range msgs[0].Messages {
 			if err := processVoucherMessage(msg); err != nil {
-				handleFailedMessage(msg, err)
+				logrus.Warnf("消息处理失败(ID:%s)，进入Pending List: %v", msg.ID, err)
+				// 不ACK，也不调用handleFailedMessage！
+				// 消息会自动进入Pending List等待重试
 			} else {
 				if _, err := redisClient.GetRedisClient().XAck(ctx, "stream.orders", "g1", msg.ID).Result(); err != nil {
 					logrus.Warnf("SyncHandler ACK失败: %v", err)
@@ -119,7 +127,7 @@ func SyncHandlerStream() {
 	}
 }
 
-// 处理pending list中的消息
+// 处理pending list中的消息（含重试逻辑）
 func handlePendingList() {
 	ctx := context.Background()
 	for {
@@ -147,18 +155,69 @@ func handlePendingList() {
 		}
 
 		for _, msg := range msgs[0].Messages {
-			if err := processVoucherMessage(msg); err != nil {
-				handleFailedMessage(msg, err)
-			} else {
-				if _, err := redisClient.GetRedisClient().XAck(ctx, "stream.orders", "g1", msg.ID).Result(); err != nil {
-					logrus.Warnf("PendingList ACK失败: %v", err)
+			// 获取当前重试次数
+			retryCount := getRetryCount(ctx, msg.ID)
+
+			if retryCount < maxRetries {
+				// 尝试处理消息
+				if err := processVoucherMessage(msg); err != nil {
+					// 增加重试次数
+					incrRetryCount(ctx, msg.ID, retryCount)
+					logrus.Warnf("Pending重试失败(ID:%s 重试%d次): %v",
+						msg.ID, retryCount+1, err)
+				} else {
+					// 处理成功：ACK并清除重试计数
+					if _, ackErr := redisClient.GetRedisClient().XAck(ctx, "stream.orders", "g1", msg.ID).Result(); ackErr != nil {
+						logrus.Warnf("PendingList ACK失败: %v", ackErr)
+					}
+					clearRetryCount(ctx, msg.ID)
 				}
+			} else {
+				// 达到最大重试次数：转入死信队列
+				handleFailedMessage(msg, fmt.Errorf("达到最大重试次数%d", maxRetries))
+				// ACK后从Pending List移除
+				if _, ackErr := redisClient.GetRedisClient().XAck(ctx, "stream.orders", "g1", msg.ID).Result(); ackErr != nil {
+					logrus.Warnf("死信消息ACK失败: %v", ackErr)
+				}
+				clearRetryCount(ctx, msg.ID)
 			}
 		}
 	}
 }
 
+// 获取消息重试次数
+func getRetryCount(ctx context.Context, msgID string) int {
+	key := fmt.Sprintf("retry:stream.orders:%s", msgID)
+	countStr, err := redisClient.GetRedisClient().Get(ctx, key).Result()
+	if err != nil {
+		if !errors.Is(err, redisConfig.Nil) {
+			logrus.Warnf("获取重试次数失败(%s): %v", key, err)
+		}
+		return 0
+	}
+	count, _ := strconv.Atoi(countStr)
+	return count
+}
+
+// 增加重试次数
+func incrRetryCount(ctx context.Context, msgID string, currentCount int) {
+	key := fmt.Sprintf("retry:stream.orders:%s", msgID)
+	newCount := currentCount + 1
+	if err := redisClient.GetRedisClient().Set(ctx, key, newCount, retryTTL).Err(); err != nil {
+		logrus.Errorf("设置重试次数失败(%s): %v", key, err)
+	}
+}
+
+// 清除重试计数
+func clearRetryCount(ctx context.Context, msgID string) {
+	key := fmt.Sprintf("retry:stream.orders:%s", msgID)
+	if err := redisClient.GetRedisClient().Del(ctx, key).Err(); err != nil {
+		logrus.Warnf("清除重试计数失败(%s): %v", key, err)
+	}
+}
+
 // 处理失败消息
+// 死信队列中的消息通常需要人工干预或专门的修复程序处理。
 func handleFailedMessage(msg redisConfig.XMessage, err error) {
 	logrus.Warnf("消息处理失败(ID:%s): %v", msg.ID, err)
 
@@ -175,12 +234,6 @@ func handleFailedMessage(msg redisConfig.XMessage, err error) {
 
 	if dlerr != nil {
 		logrus.Errorf("死信队列添加失败: %v", dlerr)
-	} else {
-		if _, ackErr := redisClient.GetRedisClient().XAck(ctx, "stream.orders", "g1", msg.ID).Result(); ackErr != nil {
-			logrus.Warnf("死信消息ACK失败: %v", ackErr)
-		} else {
-			logrus.Infof("已转移消息到死信队列: %s", msg.ID)
-		}
 	}
 }
 
