@@ -31,7 +31,7 @@ func (*UserService) SaveCode(phone string) error {
 	verifyCode := utils.RandomUtil.GenerateVerifyCode()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	err := redisClient.GetRedisClient().Set(ctx, utils.LOGIN_CODE_KEY+phone, verifyCode, time.Duration(time.Minute*utils.LOGIN_VERIFY_CODE_TTL)).Err()
+	err := redisClient.GetRedisClient().Set(ctx, utils.LOGIN_CODE_KEY+phone, verifyCode, time.Minute*utils.LOGIN_VERIFY_CODE_TTL).Err()
 	return err
 }
 
